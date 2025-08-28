@@ -97,7 +97,7 @@
         let running = false;
         let detectInterval = null;
         let history = [];
-        const emotions = ['neutral', 'happy', 'sad', 'angry', 'fearful', 'disgusted', 'surprised'];
+        const emotions = ['happy', 'neutral', 'sad', 'angry'];
 
         smoothRange.oninput = () => { smoothVal.textContent = smoothRange.value; }
 
@@ -164,13 +164,13 @@
         function drawTimeline(dominant) {
             const W = timeline.width, H = timeline.height;
             tctx.clearRect(0, 0, W, H);
-            const last = history.map(h => emotions.indexOf(Object.keys(h).reduce((a, b) => h[a] > h[b] ? a : b)));
+            const last = history.map(h => emotions.indexOf(emotions.reduce((a, b) => (h[a] || 0) > (h[b] || 0) ? a : b)));
             // draw small blocks
             const n = Math.max(1, last.length);
             const w = W / Math.max(10, n);
             last.forEach((idx, i) => {
                 const x = i * w;
-                const colorMap = ['#9aa6b3', '#ffd08a', '#9cc4ff', '#ff9b9b', '#c78eff', '#b3d17a', '#ffdf7a'];
+                const colorMap = ['#ffd08a', '#9aa6b3', '#9cc4ff', '#ff9b9b'];
                 tctx.fillStyle = colorMap[idx] || '#7aa2ff';
                 tctx.fillRect(x, 0, w, H);
             });
