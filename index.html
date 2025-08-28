@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Face Emotion Recognition — Demo</title>
+    <link rel="stylesheet" href="styles.css">
+
+    <style>
+        /* Minimal fallback styles in case styles.css is missing */
+        body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; color: #dbe7ff; background: #051225; }
+        header, footer { padding: 16px; }
+        main { padding: 16px; max-width: 1000px; margin: 0 auto; }
+        .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+        .panel { display: flex; gap: 8px; align-items: center; }
+        #wrap { position: relative; display: inline-block; background: #061226; border: 1px solid #102742; border-radius: 10px; overflow: hidden; }
+        #video { display: block; width: min(90vw, 960px); height: auto; background: #000; }
+        #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+        .label { color: #9fb0d1; font-size: 14px; }
+        .expr { display: flex; align-items: center; gap: 8px; }
+        .expr .bar { flex: 1; height: 10px; background: #0c1c34; border: 1px solid #123456; border-radius: 6px; overflow: hidden; }
+        .expr .bar i { display: block; height: 100%; background: linear-gradient(90deg, #7aa2ff, #9cc4ff); }
+        button { background: #0f2740; color: #e6eef8; border: 1px solid #123456; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+        button:disabled { opacity: 0.6; cursor: not-allowed; }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1>Face Emotion Recognition (Browser)</h1>
+        <p style="margin:6px 0 0;color:#9fb0d1">Uses <code>face-api.js</code> (TinyFaceDetector + expressions). All
+            processing runs in your browser.</p>
+    </header>
+
+    <main>
+        <div class="controls">
+            <div class="panel">
+                <button id="btnStart">Start webcam</button>
+                <button id="btnStop" disabled>Stop</button>
+                <button id="btnSnap" disabled>Snapshot</button>
+            </div>
+            <div style="margin-left:auto" class="panel">
+                <div class="label">Smoothing: <strong id="smoothVal">6</strong></div>
+                <input id="smooth" type="range" min="1" max="12" value="6">
+            </div>
+        </div>
+
+        <div id="wrap">
+            <video id="video" autoplay muted playsinline></video>
+            <canvas id="overlay"></canvas>
+        </div>
+
+        <section style="margin-top:12px;background:#07172a;padding:12px;border-radius:10px;border:1px solid #12283f">
+            <div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">
+                <div style="min-width:260px">
+                    <h3 style="margin:0 0 8px">Dominant emotion</h3>
+                    <div class="label" id="dominant">—</div>
+                </div>
+                <div style="flex:1">
+                    <h3 style="margin:0 0 8px">Probabilities (smoothed)</h3>
+                    <div id="probs"></div>
+                </div>
+                <div style="width:220px">
+                    <h3 style="margin:0 0 8px">Recent timeline</h3>
+                    <canvas id="timeline" width="220" height="80"
+                        style="background:#061226;border-radius:6px;border:1px solid #0f2740"></canvas>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <small>NOTE: This demo is for experimentation and learning. Real-world systems require stronger datasets,
+            fairness testing, and privacy-consent workflows.</small>
+    </footer>
+
+    <!-- face-api.js from CDN -->
+    <script defer src="https://unpkg.com/face-api.js/dist/face-api.min.js"></script>
+    <script>
+        // Simple face-emotion demo using face-api.js
+        const video = document.getElementById('video');
+        const overlay = document.getElementById('overlay');
+        const overlayCtx = overlay.getContext('2d');
+        const timeline = document.getElementById('timeline');
+        const tctx = timeline.getContext('2d');
+
+        const btnStart = document.getElementById('btnStart');
+        const btnStop = document.getElementById('btnStop');
+        const btnSnap = document.getElementById('btnSnap');
+        const probsDiv = document.getElementById('probs');
+        const dominantEl = document.getElementById('dominant');
+        const smoothRange = document.getElementById('smooth');
+        const smoothVal = document.getElementById('smoothVal');
+
+        let stream = null;
+        let running = false;
+        let detectInterval = null;
+        let history = [];
+        const emotions = ['neutral', 'happy', 'sad', 'angry', 'fearful', 'disgusted', 'surprised'];
+
+        smoothRange.oninput = () => { smoothVal.textContent = smoothRange.value; }
+
+        function isSecureContextOrLocalhost() {
+            const isLocalhost = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+            return location.protocol === 'https:' || isLocalhost;
+        }
+
+        async function ensureModels() {
+            // Use public hosted models to avoid local file issues
+            const MODEL_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
+            await Promise.all([
+                faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+                faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL)
+            ]);
+        }
+
+        function resizeCanvas() {
+            if (!video.videoWidth || !video.videoHeight) return;
+            overlay.width = video.videoWidth; overlay.height = video.videoHeight;
+        }
+
+        function drawResults(detections) {
+            overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+            if (!detections || !detections.length) return;
+            const det = detections[0];
+            const box = det.detection.box;
+            overlayCtx.strokeStyle = '#7aa2ff'; overlayCtx.lineWidth = 3; overlayCtx.strokeRect(box.x, box.y, box.width, box.height);
+            // draw label
+            overlayCtx.fillStyle = 'rgba(10,20,40,0.6)'; overlayCtx.fillRect(box.x, Math.max(0, box.y - 26), 160, 22);
+            overlayCtx.fillStyle = '#e6eef8'; overlayCtx.font = '16px sans-serif';
+            overlayCtx.fillText(dominantEl.textContent, box.x + 6, Math.max(16, box.y - 8));
+        }
+
+        function smoothProb(newProb) {
+            const k = parseInt(smoothRange.value);
+            history.push(newProb);
+            if (history.length > k) history.shift();
+            // average across arrays
+            const sum = {};
+            emotions.forEach(e => sum[e] = 0);
+            history.forEach(p => {
+                emotions.forEach(e => sum[e] += (p[e] || 0));
+            });
+            const avg = {};
+            emotions.forEach(e => avg[e] = sum[e] / history.length);
+            return avg;
+        }
+
+        function renderProbBars(probObj) {
+            probsDiv.innerHTML = '';
+            emotions.forEach(e => {
+                const row = document.createElement('div'); row.className = 'expr'; row.style.marginBottom = '6px';
+                const name = document.createElement('div'); name.style.width = '90px'; name.textContent = e;
+                const barWrap = document.createElement('div'); barWrap.className = 'bar';
+                const bar = document.createElement('i'); bar.style.width = (probObj[e] * 100).toFixed(1) + '%';
+                barWrap.appendChild(bar);
+                const val = document.createElement('div'); val.style.width = '40px'; val.style.textAlign = 'right'; val.textContent = (probObj[e] * 100).toFixed(1) + '%';
+                row.appendChild(name); row.appendChild(barWrap); row.appendChild(val);
+                probsDiv.appendChild(row);
+            });
+        }
+
+        function drawTimeline(dominant) {
+            const W = timeline.width, H = timeline.height;
+            tctx.clearRect(0, 0, W, H);
+            const last = history.map(h => emotions.indexOf(Object.keys(h).reduce((a, b) => h[a] > h[b] ? a : b)));
+            // draw small blocks
+            const n = Math.max(1, last.length);
+            const w = W / Math.max(10, n);
+            last.forEach((idx, i) => {
+                const x = i * w;
+                const colorMap = ['#9aa6b3', '#ffd08a', '#9cc4ff', '#ff9b9b', '#c78eff', '#b3d17a', '#ffdf7a'];
+                tctx.fillStyle = colorMap[idx] || '#7aa2ff';
+                tctx.fillRect(x, 0, w, H);
+            });
+        }
+
+        async function processFrame() {
+            if (!running) return;
+            if (video.readyState < 2) return;
+            const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 });
+            const detections = await faceapi.detectAllFaces(video, options).withFaceExpressions();
+            if (detections && detections.length) {
+                const expr = detections[0].expressions;
+                const sm = smoothProb(expr);
+                // dominant
+                const dom = Object.keys(sm).reduce((a, b) => sm[a] > sm[b] ? a : b);
+                dominantEl.textContent = dom;
+                renderProbBars(sm);
+                drawResults(detections);
+                drawTimeline(dom);
+            } else {
+                dominantEl.textContent = 'No face';
+                probsDiv.innerHTML = '';
+                overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+            }
+        }
+
+        async function startCamera() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                throw new Error('getUserMedia is not supported in this browser.');
+            }
+            const constraints = { video: { facingMode: 'user' }, audio: false };
+            stream = await navigator.mediaDevices.getUserMedia(constraints);
+            video.srcObject = stream;
+            // Ensure playback actually starts (some browsers require an explicit play())
+            try { await video.play(); } catch (e) { /* ignore, will resolve on metadata */ }
+            if (video.readyState < 2) {
+                await new Promise(resolve => {
+                    const onReady = () => { video.removeEventListener('loadedmetadata', onReady); resolve(); };
+                    video.addEventListener('loadedmetadata', onReady);
+                });
+            }
+            resizeCanvas();
+        }
+
+        btnStart.onclick = async () => {
+            btnStart.disabled = true; btnStop.disabled = false;
+            btnSnap.disabled = true;
+            if (!isSecureContextOrLocalhost()) {
+                alert('Camera access requires HTTPS or localhost. Please serve this page over HTTPS.');
+                btnStart.disabled = false; btnStop.disabled = true; return;
+            }
+            try {
+                if (!faceapi.nets.tinyFaceDetector.params || !faceapi.nets.faceExpressionNet.params) { await ensureModels(); }
+                await startCamera();
+                running = true;
+                btnSnap.disabled = false;
+                detectInterval = setInterval(processFrame, 150);
+            } catch (err) {
+                alert('Camera error: ' + (err && err.message ? err.message : String(err)));
+                btnStart.disabled = false; btnStop.disabled = true; btnSnap.disabled = true;
+            }
+        }
+
+        btnStop.onclick = () => {
+            btnStart.disabled = false; btnStop.disabled = true; btnSnap.disabled = true;
+            running = false;
+            clearInterval(detectInterval);
+            if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+            overlayCtx.clearRect(0, 0, overlay.width, overlay.height); dominantEl.textContent = '—'; probsDiv.innerHTML = ''; history = [];
+        }
+
+        btnSnap.onclick = () => {
+            // capture snapshot of overlay + video
+            const c = document.createElement('canvas'); c.width = video.videoWidth; c.height = video.videoHeight; const ctx = c.getContext('2d');
+            ctx.drawImage(video, 0, 0);
+            ctx.drawImage(overlay, 0, 0);
+            const data = c.toDataURL('image/png');
+            const a = document.createElement('a'); a.href = data; a.download = 'snapshot.png'; a.click();
+        }
+
+        window.addEventListener('resize', () => resizeCanvas());
+    </script>
+</body>
+
+</html>
